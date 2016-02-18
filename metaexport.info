@@ -1,0 +1,6 @@
+name = Metatag Import Export
+description = Provides a spreadsheet export and import functionality
+core = 7.x
+package = Digital Hammer
+dependencies[] = metatag
+dependencies[] = pathauto

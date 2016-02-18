@@ -1,0 +1,518 @@
+<?php
+
+if ( ! function_exists('dd')) {
+    function dd($var)
+    {
+        print '<pre>';
+        print_r($var);
+        print '</pre>';
+        exit();
+    }
+}
+
+function metaexport_menu()
+{
+    $items = [ ];
+
+    $items['admin/config/search/metatags/metaexport'] = [
+        'title'            => 'Export',
+        'page callback'    => 'drupal_get_form',
+        'page arguments'   => [ 'metaexport_admin_export_form' ],
+        'access arguments' => [ 'administer meta tags' ],
+        'type'             => MENU_LOCAL_TASK,
+        'weight'           => 45,
+    ];
+
+    $items['admin/config/search/metatags/metaimport'] = [
+        'title'            => 'Import',
+        'page callback'    => 'drupal_get_form',
+        'page arguments'   => [ 'metaexport_admin_import_form' ],
+        'access arguments' => [ 'administer meta tags' ],
+        'type'             => MENU_LOCAL_TASK,
+        'weight'           => 45,
+    ];
+
+    return $items;
+}
+
+function metaexport_admin_export_form()
+{
+    $form['export_fieldset'] = [
+        '#type'        => 'fieldset',
+        '#title'       => t('Export'),
+        '#weight'      => 5,
+        '#collapsible' => true,
+        '#collapsed'   => false,
+    ];
+
+    /*
+
+    $entityTypes = entity_get_info();
+    $options = [];
+    foreach($entityTypes as $entity_type => $entity_info) {
+        if (metatag_entity_type_is_suitable($entity_type, $entity_info) && metatag_entity_supports_metatags($entity_type) && variable_get('metatag_enable_' . $entity_type, false)) {
+            if ( ! empty( $entity_info['bundles'] )) {
+                foreach($entity_info['bundles'] as $bundle_name => $bundle_info) {
+                    if (( count($entity_info['bundles']) > 1 || $entity_type != $bundle_name ) && metatag_entity_supports_metatags($entity_type, $bundle_name)
+                    ) {
+                        $options[$entity_type . '+' . $bundle_name] = t($entity_info['label']) . ': ' . t($bundle_info['label']);
+                    }
+                }
+            }
+        }
+    }
+
+    $form['export_fieldset']['types'] = array(
+        '#type' => 'select',
+        '#multiple' => true,
+        '#title' => 'Материалы для экспорта',
+        '#options' => $options,
+        '#description' => 'Выберите материалы для экспорта',
+    );*/
+
+    $form['export_fieldset']['export_text'] = [
+        '#markup' => '<div>' . t('Exports nodes, terms and views') . '</div>',
+    ];
+
+    $form['export_fieldset']['export'] = [ '#type' => 'submit', '#name' => 'action', '#value' => t('Export') ];
+
+    return $form;
+}
+
+function metaexport_admin_import_form()
+{
+    $form['import_fieldset'] = [
+        '#type'        => 'fieldset',
+        '#title'       => t('Import'),
+        '#weight'      => 5,
+        '#collapsible' => true,
+        '#collapsed'   => false,
+    ];
+
+    $form['import_fieldset']['import_text'] = [
+        '#markup' => '<div>' . t('Select csv file and click Import button') . '</div>',
+    ];
+
+    $form['import_fieldset']['file'] = [
+        '#type'           => 'file',
+        '#title'          => t('Choose a file for import'),
+        '#description' => 'Выберите файл с расширением csv, сгенерированный с помощью кнопки выше',
+    ];
+
+    $form['import_fieldset']['import'] = [ '#type' => 'submit', '#name' => 'action', '#value' => t('Import') ];
+
+    return $form;
+}
+
+function metaexport_admin_import_form_validate($form, &$form_state) {
+    $validators = array(
+        'file_validate_extensions' => array('csv'),
+    );
+    // Загружаем файл в sites/default/files (по умолчанию)
+    if ($file = file_save_upload('file', $validators, 'public://')) {
+        $form_state['values']['file'] = $file; // передаём информацию о файле в ф-ю mymodule_form_submit()
+    }
+    else {
+        form_set_error('file', 'Файл не был загружен');
+    }
+}
+
+function metaexport_admin_export_form_submit($form, $form_state)
+{
+    metaexport_export_metatags();
+}
+
+function metaexport_admin_import_form_submit($form, $form_state)
+{
+    $values = $form_state['values'];
+
+    $file = $values['file'];
+    $fh = fopen($file->uri, 'r');
+
+    if ($fh === false) {
+        drupal_set_message('Ошибка открытия файла.');
+        return;
+    }
+
+    $operations = [];
+
+    while (($row = fgetcsv($fh)) !== FALSE) {
+        $entity_type = $row[0];
+        $bundle = $row[1];
+        $entity_id = $row[2];
+
+        $data = [
+            'title' => isset($row['3']) ? $row['3'] : '',
+            'uri' => isset($row['4']) ? $row['4'] : '',
+            'metatags' => [
+                'title' => isset($row[5]) ? $row[5] : '',
+                'keywords' => isset($row[6]) ? $row[6] : '',
+                'description' => isset($row[7]) ? $row[7] : '',
+            ],
+        ];
+
+        switch($entity_type) {
+            case 'node';
+                $operations[] = ['update_node_metatags', array($bundle, $entity_id, $data)];
+                break;
+
+            case 'taxonomy_term':
+                $operations[] = ['update_taxonomy_term_metatags', array($bundle, $entity_id, $data)];
+                break;
+
+            case 'view':
+                $operations[] = ['update_view_metatags', array($bundle, $entity_id, $data)];
+                break;
+        }
+    }
+
+    fclose($fh);
+
+    $batch = array(
+        'operations' => $operations,
+        'finished' => 'metaexport_export_batch_finished',
+        'title' => 'Импорт данных',
+        'init_message' => 'Подготовка данных',
+        'progress_message' => 'Выполнено @current из @total.',
+        'error_message' => 'Произошла ошибка.',
+    );
+
+    batch_set($batch);
+}
+
+function metaexport_export_batch_finished($success, $results, $operations) {
+    if ($success) {
+        drupal_set_message('Инмортировано ' . count($results) . ' материалов');
+    } else {
+        drupal_set_message('Завершено с ошибками.', 'error');
+    }
+}
+
+/**
+ * Get metatag for entity
+ *
+ * @param $entity
+ * @param $entity_type
+ *
+ * @return array
+ */
+function metaexport_get_entity_metatag($entity, $entity_type) {
+    $meta = metatag_generate_entity_metatags($entity, $entity_type);
+
+    return extract_metatags($meta);
+}
+
+function extract_metatags($meta) {
+    $title = isset($meta['title'])
+        ? $meta['title']['#attached']['metatag_set_preprocess_variable'][0][2]
+        : '';
+
+    $keywords = isset($meta['keywords'])
+        ? $meta['keywords']['#attached']['drupal_add_html_head'][0][0]['#value']
+        : '';
+
+    $description = isset($meta['description'])
+        ? $meta['description']['#attached']['drupal_add_html_head'][0][0]['#value']
+        : '';
+
+    return [$title, $keywords, $description];
+}
+
+function writeNodesMetatags($fh) {
+    $entity_type = 'node';
+    $types = [];
+    $entity_info = entity_get_info($entity_type);
+    if (metatag_entity_type_is_suitable($entity_type, $entity_info) && metatag_entity_supports_metatags($entity_type) && variable_get('metatag_enable_' . $entity_type, false)) {
+        if ( ! empty( $entity_info['bundles'] )) {
+            foreach($entity_info['bundles'] as $bundle_name => $bundle_info) {
+                if (metatag_entity_supports_metatags($entity_type, $bundle_name)) {
+
+
+                    $query = new EntityFieldQuery();
+                    $query->entityCondition('entity_type', $entity_type);
+                    $query->entityCondition('bundle', $bundle_name);
+                    $result  = $query->execute();
+                    $nodeIds = array_keys($result['node']);
+
+                    if (!$nodeIds) {
+                        continue;
+                    }
+
+                    $nodes = node_load_multiple($nodeIds);
+                    // $metatags = metatag_metatags_load_multiple($entity_type, $nodeIds);
+
+                    foreach ($nodes as $node) {
+                        $row = ['node', $node->type, $node->nid, $node->title ];
+
+                        $row[] = drupal_get_path_alias('node/' . $node->nid);
+
+                        list($title, $keywords, $description) = metaexport_get_entity_metatag($node, $entity_type);
+                        $row[] = $title;
+                        $row[] = $keywords;
+                        $row[] = $description;
+
+                        fputcsv($fh, $row);
+                    }
+                }
+            }
+        }
+    }
+}
+
+function writeTaxonomyMetatags($fh) {
+    $entity_type = 'taxonomy_term';
+    $entity_info = entity_get_info($entity_type);
+    if (metatag_entity_type_is_suitable($entity_type, $entity_info) && metatag_entity_supports_metatags($entity_type) && variable_get('metatag_enable_' . $entity_type, false)) {
+        if ( ! empty( $entity_info['bundles'] )) {
+            foreach($entity_info['bundles'] as $bundle_name => $bundle_info) {
+                if (metatag_entity_supports_metatags($entity_type, $bundle_name)) {
+
+                    $query = new EntityFieldQuery();
+                    $query->entityCondition('entity_type', $entity_type);
+                    $query->entityCondition('bundle', $bundle_name);
+                    $result  = $query->execute();
+                    $entity_ids = array_keys($result[$entity_type]);
+
+                    if (!$entity_ids) {
+                        continue;
+                    }
+
+                    $entities = entity_load($entity_type, $entity_ids);
+                    // $metatags = metatag_metatags_load_multiple($entity_type, $entity_ids);
+
+                    foreach ($entities as $entity) {
+                        $row = ['taxonomy_term', $entity->vocabulary_machine_name, $entity->tid, $entity->name ];
+
+                        $row[] = drupal_get_path_alias('taxonomy/term/' . $entity->tid);
+
+                        list($title, $keywords, $description) = metaexport_get_entity_metatag($entity, $entity_type);
+                        $row[] = $title;
+                        $row[] = $keywords;
+                        $row[] = $description;
+
+                        fputcsv($fh, $row);
+                    }
+                }
+            }
+        }
+    }
+}
+
+function metaexport_export_metatags()
+{
+    $entityType = 'node';
+    $bundle     = 'manufacture';
+    $path       = 'public://metaexport/';
+    $filename   = 'metaexport-' . REQUEST_TIME . '.csv';
+
+    if ( ! file_prepare_directory($path, FILE_CREATE_DIRECTORY)) {
+        drupal_set_message(t('Unable to create directory in file system. Check permissions and try again.'), 'error');
+
+        return;
+    }
+    // Ensure the file
+    $file = file_save_data('', $path . $filename);
+    if ( ! $file) {
+        drupal_set_message(t('Unable to write to file system. Check permissions and try again.'), 'error');
+
+        return;
+    }
+
+    // Add a headers to the csv
+    $fh = fopen($file->uri, 'w');
+    if ( ! $fh) {
+        drupal_set_message(t('Unable open file for writing. Check permissions and try again.'), 'error');
+        $context['finished'] = 1;
+
+        return;
+    }
+
+    $titles = [
+        'Cущность',
+        'Тип',
+        'ID',
+        'Заголовок H1',
+        'uri',
+        'meta_title',
+        'meta_keywords',
+        'meta_description',
+    ];
+
+    fputcsv($fh, $titles);
+
+    writeTaxonomyMetatags($fh);
+    writeNodesMetatags($fh);
+    writeViewsMetatags($fh);
+
+    $filename = file_create_url($file->uri);
+
+    drupal_set_message(t('Export complete. <a href="!url">!filename</a>.', [
+        '!url'      => $filename,
+        '!filename' => $file->filename,
+    ]));
+}
+
+/**
+ * @param $fh
+ */
+function writeViewsMetatags($fh)
+{
+    if (metatag_config_is_enabled('view')) {
+        foreach (views_get_all_views() as $view) {
+            foreach ($view->display as $display_name => $display) {
+                if ($display->display_plugin !== 'page') {
+                    continue;
+                }
+
+                $view->set_display($display_name);
+
+                // Load the meta tags for this view.
+                $metatags = $view->display_handler->get_option('metatags');
+                if (!is_array($metatags) || empty($metatags)) {
+                    $metatags = array();
+                }
+
+                // If meta tags were found but they're not nested for the language, fix it.
+                // This leaves some possibility for future versions to support translation.
+                if (!empty($metatags) && !isset($metatags[LANGUAGE_NONE])) {
+                    $metatags = array(LANGUAGE_NONE => $metatags);
+                }
+                $instance = 'view:' . $view->name;
+                $options = array();
+                $options['token data']['view'] = $view;
+                $meta = metatag_metatags_view($instance, $metatags, $options);
+                list($title, $keywords, $description) = extract_metatags($meta);
+
+                $row   = [ ];
+                $row[] = 'view';
+                $row[] = $view->name;
+                $row[] = $display_name;
+                $row[] = $view->get_title();
+                $row[] = $view->get_url();
+                $row[] = $title;
+                $row[] = $keywords;
+                $row[] = $description;
+
+                fputcsv($fh, $row);
+            }
+        }
+    }
+}
+
+function metaexport_get_pid_alias($source, $lang = LANGUAGE_NONE)
+{
+    $pid = db_select('url_alias', 'ua')
+        ->fields('ua', ['pid'])
+        ->condition('ua.source', $source)
+        ->condition('ua.language', $lang)
+        ->execute()
+        ->fetchField();
+
+    return $pid ? $pid : 0;
+}
+
+/**
+ * @param $node_type
+ * @param $node_id
+ * @param $data
+ *
+ * @return bool
+ */
+function update_node_metatags($node_type, $node_id, $data, &$context)
+{
+    $node = node_load($node_id);
+
+    if ($node) {
+        $node->title = $data['title'];
+        $node->metatags['und']['title']['value'] = $data['metatags']['title'];
+        $node->metatags['und']['description']['value'] = $data['metatags']['description'];
+        $node->metatags['und']['keywords']['value'] = $data['metatags']['keywords'];
+
+        $source  = "node/$node->nid";
+
+        $node->path = [
+            'alias' => $data['uri'],
+            'pid' => metaexport_get_pid_alias($source),
+            'source' => $source,
+            'language' => 'ru',
+            'pathauto' => 0,
+        ];
+
+        $context['results'][] = $node->title;
+        $context['message'] = 'Импорт <em>' . $node->title . '</em>';
+
+        node_save($node);
+
+        return true;
+    }
+
+    return false;
+}
+
+/**
+ * @param $bundle
+ * @param $entity_id
+ * @param $metatags
+ *
+ * @return bool
+ */
+function update_taxonomy_term_metatags($bundle, $entity_id, $data, &$context)
+{
+    $term = taxonomy_term_load($entity_id);
+
+    if ($term) {
+        $term->name = $data['title'];
+        $term->metatags['und']['title']['value'] = $data['metatags']['title'];
+        $term->metatags['und']['description']['value'] = $data['metatags']['description'];
+        $term->metatags['und']['keywords']['value'] = $data['metatags']['keywords'];
+
+        $source  = "taxonomy/term/$entity_id";
+
+        $term->path = [
+            'alias' => $data['uri'],
+            'pid' => metaexport_get_pid_alias($source),
+            'source' => $source,
+            'language' => 'ru',
+            'pathauto' => 0,
+        ];
+
+        $context['results'][] = $term->name;
+        $context['message'] = 'Импорт <em>' . $term->name . '</em>';
+
+        taxonomy_term_save($term);
+        return true;
+    }
+
+    return false;
+}
+
+function update_view_metatags($view_name, $display_id, $data, &$context)
+{
+    $view = views_get_view($view_name);
+    if ($view) {
+        $view->set_display($display_id);
+        $langcode = LANGUAGE_NONE;
+
+        $views_metatags[$langcode]['title']['value'] = $data['metatags']['title'];
+        $views_metatags[$langcode]['keywords']['value'] = $data['metatags']['keywords'];
+        $views_metatags[$langcode]['description']['value'] = $data['metatags']['description'];
+
+        // $this->display->set_option('metatags', $data['metatags']);
+
+        $old_metatags = $view->display_handler->get_option('metatags');
+
+        $views_metatags = array_merge([], $old_metatags, $views_metatags);
+
+        $view->display_handler->set_option('title', $data['title']);
+        $view->display_handler->set_option('path', $data['uri']);
+        $view->display_handler->set_option('metatags', $views_metatags);
+        $view->save();
+
+        $context['results'][] = $data['title'];
+        $context['message'] = 'Импорт <em>' . $data['title'] . '</em>';
+
+        return true;
+    }
+
+    return false;
+}
